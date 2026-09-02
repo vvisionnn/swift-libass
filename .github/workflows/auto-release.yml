@@ -1,6 +1,9 @@
 name: LibASS Auto Release
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/auto-release.yml]
   schedule:
     - cron: "37 3 * * *"
   workflow_dispatch:
@@ -18,7 +21,7 @@ env:
 jobs:
   discover:
     name: Check canonical stable release
-    if: github.repository == 'vvisionnn/swift-libass' && github.ref == 'refs/heads/main'
+    if: github.repository == 'vvisionnn/swift-libass' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
