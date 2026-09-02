@@ -1,0 +1,94 @@
+[settings]
+lockfile = true
+
+[tools]
+actionlint = "1.7.12"
+jq = "1.8.2"
+meson = "1.11.2"
+ninja = "1.13.2"
+python = "3.13.15"
+shellcheck = "0.11.0"
+
+[tasks.doctor]
+description = "Check the pinned Apple and native build tools"
+run = "./Scripts/check-environment.sh"
+
+[tasks."sources:fetch"]
+description = "Fetch the four checksum-pinned upstream source archives"
+run = "python3 Scripts/release.py fetch-sources"
+
+[tasks."sources:verify"]
+description = "Verify source checksums, archive safety, and license inputs"
+run = "python3 Scripts/release.py verify-sources"
+
+[tasks."upstream:check"]
+description = "Check the canonical stable libass release"
+run = "python3 Scripts/release.py discover"
+
+[tasks.build]
+description = "Build five thin Apple slices and assemble LibASS.xcframework"
+run = "./Scripts/build-xcframework.sh"
+
+[tasks."artifact:verify"]
+description = "Verify all architectures, symbols, modules, and privacy manifests"
+run = "./Scripts/validate-artifact.sh"
+
+[tasks.package]
+description = "Create normalized binary and corresponding-source release assets"
+run = "python3 Scripts/release.py package"
+
+[tasks."release:finalize"]
+description = "Bind the package manifest to the built release checksum"
+run = "python3 Scripts/release.py finalize"
+
+[tasks."release:verify"]
+description = "Verify all release asset digests and package bindings"
+run = "python3 Scripts/release.py verify-release"
+
+[tasks."test:release"]
+description = "Run adversarial release, source, and discovery tests"
+run = "python3 -I -B -m unittest discover -s Tests/ReleaseTests -p 'test_*.py' -v"
+
+[tasks."test:local"]
+description = "Test the package, rendering, and standalone system linkage"
+run = "./Scripts/test-package.sh"
+
+[tasks."test:build"]
+description = "Test native metadata and privacy validation adversarially"
+run = "python3 -I -B -m unittest discover -s Tests/BuildTests -p 'test_*.py' -v"
+
+[tasks."test:simulator"]
+description = "Build iOS device and run rendering tests on Simulator"
+run = "./Scripts/test-ios-simulator.sh"
+
+[tasks."test:remote"]
+description = "Resolve and exercise the configured exact remote release"
+run = "./Scripts/verify-remote-release.sh --tag $(jq -r .packageVersion Configuration/release.json)"
+
+[tasks.reproducibility]
+description = "Require byte-identical builds in two independent directories"
+run = "./Scripts/check-reproducibility.sh"
+
+[tasks."reproducibility:package"]
+description = "Require deterministic release archive packaging"
+run = "./Scripts/check-reproducibility.sh --package-only"
+
+[tasks.lint]
+description = "Lint shell, workflow, package, and privacy inputs"
+run = "./Scripts/lint.sh"
+
+[tasks.check]
+description = "Run the local qualification suite used in CI"
+run = [
+  "mise run lint",
+  "mise run doctor",
+  "mise run test:release",
+  "mise run test:build",
+  "mise run sources:verify",
+  "mise run artifact:verify",
+  "mise run test:local",
+  "mise run test:simulator",
+  "mise run package",
+  "mise run release:verify",
+  "mise run reproducibility:package",
+]

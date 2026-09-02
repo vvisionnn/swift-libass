@@ -1,0 +1,4 @@
+framework module LibASS [system] {
+    umbrella header "LibASS.h"
+    export *
+}
