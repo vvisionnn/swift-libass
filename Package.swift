@@ -11,7 +11,7 @@ let libassBinaryTarget: Target =
         : .binaryTarget(
             name: "LibASS",
             url: "https://github.com/vvisionnn/swift-libass/releases/download/1.0.0/LibASS.xcframework.zip",
-            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+            checksum: "f9c414740a0f43260a03876e46cf2eb0d7e461f3b5d5aa6574d9fb6aa93fab32"
         )
 
 let package = Package(
