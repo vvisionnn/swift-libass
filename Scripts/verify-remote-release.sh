@@ -17,7 +17,17 @@ if [[ -n "$expected_checksum" ]]; then
 fi
 repository="https://github.com/vvisionnn/swift-libass.git"
 probe_root="$(mktemp -d "${TMPDIR:-/tmp}/swift-libass-release.XXXXXX")"
+mkdir -p "$PROJECT_ROOT/.build/remote-smoke"
+evidence_root="$(mktemp -d "$PROJECT_ROOT/.build/remote-smoke/run.XXXXXX")"
 cleanup() {
+    local status=$?
+    if [[ "$status" != 0 ]]; then
+        printf 'Failed probe retained at %s\n' "$probe_root" >&2
+        /usr/bin/log show --last 2m --style compact \
+            --predicate 'eventMessage CONTAINS "Smoke" AND (process == "kernel" OR process == "amfid" OR process == "syspolicyd")' \
+            >"$evidence_root/launch-system.log" 2>&1 || true
+        return "$status"
+    fi
     case "$probe_root" in
         "${TMPDIR:-/tmp}"/swift-libass-release.*) /bin/rm -rf "$probe_root" ;;
         *) return 1 ;;
@@ -52,7 +62,13 @@ cp "$PROJECT_ROOT/Tests/Smoke/main.swift" "$probe_root/package/Sources/Smoke/mai
 sed '/@testable import LibASSLinkerSupport/d; /@Test func bundlesRequiredPrivacyDeclaration/,$d' \
     "$PROJECT_ROOT/Tests/LibASSTests/LibASSTests.swift" >"$probe_root/package/Tests/SmokeTests/SmokeTests.swift"
 env -u SWIFT_LIBASS_USE_LOCAL_XCFRAMEWORK -u SWIFTPM_MIRROR_CONFIG \
-    swift run --package-path "$probe_root/package" --manifest-cache none Smoke
+    swift build --package-path "$probe_root/package" --manifest-cache none --product Smoke
+binary_directory="$(env -u SWIFT_LIBASS_USE_LOCAL_XCFRAMEWORK -u SWIFTPM_MIRROR_CONFIG \
+    swift build --package-path "$probe_root/package" --show-bin-path)"
+probe_binary="$binary_directory/Smoke"
+codesign -dvvv --entitlements :- "$probe_binary" >"$evidence_root/signature-details.log" 2>&1
+codesign --verify --strict --verbose=4 "$probe_binary" >"$evidence_root/signature-verification.log" 2>&1
+"$probe_binary"
 jq -e --arg tag "$tag" --arg revision "$revision" --arg repository "$repository" '
     [.pins[] | select(.identity == "swift-libass" and .location == $repository and .state.version == $tag and .state.revision == $revision)] | length == 1
 ' "$probe_root/package/Package.resolved" >/dev/null
