@@ -1,0 +1,278 @@
+name: LibASS Auto Release
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: swift-libass-auto-release
+  cancel-in-progress: false
+
+env:
+  MISE_YES: "1"
+  MISE_LOCKED: "1"
+
+jobs:
+  discover:
+    name: Check canonical stable release
+    if: github.repository == 'vvisionnn/swift-libass' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      required: ${{ steps.decision.outputs.required }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: mise run test:release
+      - name: Discover and decide whether a build is needed
+        id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          mkdir -p .artifacts
+          mise exec -- python3 Scripts/release.py discover > .artifacts/discovery.json
+          update="$(mise exec -- jq -r .updateAvailable .artifacts/discovery.json)"
+          version="$(mise exec -- jq -r .packageVersion Configuration/release.json)"
+          status="$(curl --disable --silent --show-error --output "$RUNNER_TEMP/current-release.json" \
+            --write-out '%{http_code}' --header "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$version")"
+          case "$status" in
+            200) mise exec -- jq -e '.draft == false and .immutable == true' "$RUNNER_TEMP/current-release.json" ;;
+            404) ;;
+            *) echo "Release lookup failed: HTTP $status" >&2; exit 1 ;;
+          esac
+          if [[ "$update" == true || "$status" == 404 ]]; then
+            echo 'required=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'required=false' >> "$GITHUB_OUTPUT"
+            echo "The configured package already tracks the stable upstream release."
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.decision.outputs.required == 'true'
+        with:
+          name: discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/discovery.json
+          if-no-files-found: error
+          retention-days: 2
+
+  build:
+    name: Read-only native qualification
+    needs: discover
+    if: needs.discover.outputs.required == 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      LIBASS_BUILD_JOBS: "8"
+    outputs:
+      checksum: ${{ steps.result.outputs.checksum }}
+      version: ${{ steps.result.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/discovery
+      - name: Prepare canonical source transition
+        run: mise exec -- python3 Scripts/release.py prepare-update --discovery .artifacts/discovery/discovery.json
+      - run: mise run doctor
+      - run: mise run sources:fetch
+      - run: mise run build
+      - run: mise run artifact:verify
+      - run: mise run test:build
+      - run: mise run test:local
+      - run: mise run test:simulator
+      - run: mise run reproducibility
+      - name: Bind and verify the complete release
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          mise run package
+          mise run release:finalize
+          mise run package
+          mise run release:verify
+          mise run reproducibility:package
+          mise run lint
+          mise run test:release
+          mise run test:build
+      - name: Record the qualified digest
+        id: result
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          printf 'checksum=%s\n' "$(mise exec -- jq -r .artifact.swiftPackageChecksum Configuration/release.json)" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$(mise exec -- jq -r .packageVersion Configuration/release.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/release/LibASS.xcframework.zip
+            .artifacts/release/swift-libass-${{ steps.result.outputs.version }}-source-kit.zip
+            .artifacts/release/release-manifest.json
+            .artifacts/release/SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 2
+
+  publish:
+    name: Publish verified data from a fresh runner
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.publish.outputs.candidate }}
+      branch: ${{ steps.publish.outputs.branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - uses: ./.github/actions/toolchain
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/discovery
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/release
+      - name: Recreate only the permitted manifest edits and verify data
+        env:
+          EXPECTED_CHECKSUM: ${{ needs.build.outputs.checksum }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          mise exec -- python3 Scripts/release.py prepare-update --discovery .artifacts/discovery/discovery.json
+          mise run release:finalize
+          test "$(mise exec -- jq -r .artifact.swiftPackageChecksum Configuration/release.json)" = "$EXPECTED_CHECKSUM"
+          test "$(mise exec -- jq -r .packageVersion Configuration/release.json)" = "$EXPECTED_VERSION"
+          mise run release:verify
+          git diff --check
+          unexpected="$(git diff --name-only -- . ':!Package.swift' ':!Configuration/release.json')"
+          test -z "$unexpected"
+      - name: Create immutable tagged release without running its binaries
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          # Immutable releases are a repository setting; verify the published
+          # release below without requiring an administrative token.
+          tag_status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null || tag_status=$?
+          test "$tag_status" = 2
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- Package.swift Configuration/release.json
+          if ! git diff --cached --quiet; then
+            git commit -m "build(release): package libass $(mise exec -- jq -r .libass.version Configuration/release.json)"
+          fi
+          candidate="$(git rev-parse HEAD)"
+          branch="automation/release-$VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          release_id=""
+          published=false
+          branch_created=false
+          cleanup() {
+            status=$?
+            if [[ "$published" == false ]]; then
+              if [[ -n "$release_id" ]]; then
+                # Delete only this run's still-unpublished draft, never a release.
+                current="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id")" || return "$status"
+                # shellcheck disable=SC2016
+                if printf '%s' "$current" | mise exec -- jq -e --arg commit "$candidate" \
+                  '.draft == true and .target_commitish == $commit' >/dev/null; then
+                  gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+                else
+                  return "$status"
+                fi
+              fi
+              if [[ "$branch_created" == true ]]; then
+                git push origin --delete "$branch" || true
+              fi
+            fi
+            return "$status"
+          }
+          trap cleanup EXIT
+          git push origin "$candidate:refs/heads/$branch"
+          branch_created=true
+          release_id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$VERSION" -f target_commitish="$candidate" -F draft=true \
+            -f name="LibASS $VERSION" \
+            -f body='Static LibASS XCFramework for iOS, iOS Simulator, and macOS. Includes corresponding source, licenses, build inputs, and SHA-256 checksums.' --jq .id)"
+          gh release upload "$VERSION" \
+            .artifacts/release/LibASS.xcframework.zip \
+            ".artifacts/release/swift-libass-$VERSION-source-kit.zip" \
+            .artifacts/release/release-manifest.json .artifacts/release/SHA256SUMS
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$RUNNER_TEMP/draft.json"
+          mise exec -- python3 Scripts/release.py verify-github-release \
+            --document "$RUNNER_TEMP/draft.json" --commit "$candidate" --draft
+          gh release edit "$VERSION" --draft=false --latest
+          published=true
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > "$RUNNER_TEMP/published.json"
+          mise exec -- python3 Scripts/release.py verify-github-release \
+            --document "$RUNNER_TEMP/published.json" --commit "$candidate"
+          test "$(git ls-remote --tags origin "refs/tags/$VERSION" | cut -f1)" = "$candidate"
+          printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+
+  remote-smoke:
+    name: Read-only published package smoke test
+    needs: [build, publish]
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - name: Resolve the exact release and test macOS and Simulator
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          CHECKSUM: ${{ needs.build.outputs.checksum }}
+        run: mise exec -- ./Scripts/verify-remote-release.sh --tag "$VERSION" --expected-checksum "$CHECKSUM"
+
+  promote:
+    name: Fast-forward main only after remote qualification
+    needs: [build, publish, remote-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Promote the tested candidate without rewriting history
+        env:
+          CANDIDATE: ${{ needs.publish.outputs.candidate }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CANDIDATE_BRANCH: ${{ needs.publish.outputs.branch }}
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          git fetch origin main "refs/tags/$VERSION:refs/tags/$VERSION"
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$VERSION^{commit}")" = "$CANDIDATE"
+          git merge-base --is-ancestor "$GITHUB_SHA" "$CANDIDATE"
+          git push origin "$CANDIDATE:refs/heads/main"
+          git push origin --delete "$CANDIDATE_BRANCH"

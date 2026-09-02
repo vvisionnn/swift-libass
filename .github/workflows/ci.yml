@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      native:
+        description: Also build and test the five native slices
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  MISE_YES: "1"
+  MISE_LOCKED: "1"
+
+jobs:
+  policy:
+    name: Release and repository checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: mise run lint
+      - run: mise run test:release
+
+  native:
+    name: Five-slice native qualification
+    if: github.event_name == 'workflow_dispatch' && inputs.native
+    needs: policy
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      LIBASS_BUILD_JOBS: "8"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: mise run doctor
+      - run: mise run sources:fetch
+      - run: mise run build
+      - run: mise run artifact:verify
+      - run: mise run test:build
+      - run: mise run test:local
+      - run: mise run test:simulator
+      - run: mise run package
+      - run: mise run release:verify
+      - run: mise run reproducibility:package
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .build/libass/logs/
+            .build/simulator-tests/*.log
+            .artifacts/release/release-manifest.json
+          if-no-files-found: warn
+          retention-days: 7

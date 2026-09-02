@@ -1,0 +1,34 @@
+name: Locked tools
+description: Install locked mise tools and the pinned Apple pkg-config tool when needed
+runs:
+  using: composite
+  steps:
+    - name: Install mise
+      uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      with:
+        cache: false
+        install: false
+        version: 2026.8.16
+    - name: Install locked tools
+      shell: bash --noprofile --norc -euo pipefail {0}
+      run: mise install --locked
+    - name: Provision pinned Apple build tools
+      if: runner.os == 'macOS'
+      shell: bash --noprofile --norc -euo pipefail {0}
+      run: |
+        test "$(xcodebuild -version)" = $'Xcode 16.4\nBuild version 16F6'
+        prefix="$RUNNER_TEMP/pkgconf-prefix"
+        archive="$RUNNER_TEMP/pkgconf-3.0.5.tar.xz"
+        curl --disable --fail --silent --show-error --location \
+          --proto '=https' --proto-redir '=https' --retry 3 \
+          --output "$archive" https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.5.tar.xz
+        test "$(shasum -a 256 "$archive" | awk '{print $1}')" = \
+          "3acd3a8a3cce65a8d620321855d92fb602e026cbe8e13ee36bdec58483b59ace"
+        tar -xf "$archive" -C "$RUNNER_TEMP"
+        cd "$RUNNER_TEMP/pkgconf-3.0.5"
+        ./configure --disable-dependency-tracking --prefix="$prefix"
+        make -j2
+        make install
+        ln -s pkgconf "$prefix/bin/pkg-config"
+        test "$("$prefix/bin/pkg-config" --version)" = 3.0.5
+        printf '%s\n' "$prefix/bin" >> "$GITHUB_PATH"

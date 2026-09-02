@@ -24,3 +24,8 @@ Release jobs build with read-only repository permissions. Publication runs in
 a fresh job, checks fixed-name assets and digests, and does not execute native
 build outputs. Release tags and published assets must never be replaced;
 correct packaging mistakes with a new package version.
+
+Before enabling automatic publication, a repository administrator must enable
+GitHub's immutable releases setting. The workflow uses only the built-in
+`GITHUB_TOKEN`, verifies that every published release is immutable, and needs
+no administrative token or additional personal access token.
