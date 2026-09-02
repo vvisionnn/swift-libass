@@ -69,6 +69,8 @@ probe_binary="$binary_directory/Smoke"
 codesign -dvvv --entitlements :- "$probe_binary" >"$evidence_root/signature-details.log" 2>&1
 codesign --verify --strict --verbose=4 "$probe_binary" >"$evidence_root/signature-verification.log" 2>&1
 "$probe_binary"
+env -u SWIFT_LIBASS_USE_LOCAL_XCFRAMEWORK -u SWIFTPM_MIRROR_CONFIG \
+    swift run --package-path "$probe_root/package" --skip-build Smoke
 jq -e --arg tag "$tag" --arg revision "$revision" --arg repository "$repository" '
     [.pins[] | select(.identity == "swift-libass" and .location == $repository and .state.version == $tag and .state.revision == $revision)] | length == 1
 ' "$probe_root/package/Package.resolved" >/dev/null
